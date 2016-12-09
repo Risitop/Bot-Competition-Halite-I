@@ -1,1 +1,3 @@
 # Halite-RISIBOT
+
+La chancla !
