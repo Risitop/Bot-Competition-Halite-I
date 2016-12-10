@@ -67,8 +67,13 @@ class GameMap:
         self.production = tuple(tuple(map(int, substring)) for substring in grouper(production_string.split(), self.width))
         self.contents = None
         self.get_frame(map_string)
-        self.starting_player_count = len(set(square.owner for square in self)) - 1
+        self.player_ids = set(square.owner for square in self if square.owner)
+        self.starting_player_count = len(self.player_ids)
+        self.current_player_count = len(self.player_ids)
         self.average_production = sum([square.production for square in self]) / (self.width * self.height)
+        self.player_armies = [sum([1 for square in self if square.owner == player_id]) for player_id in self.player_ids]
+        self.player_productions = [sum([square.production for square in self if square.owner == player_id]) for player_id in self.player_ids]
+        self.player_interests = [self.player_productions[i] / max(1, self.player_armies[i]) for i in range(len(self.player_armies)) ]
 
     def get_frame(self, map_string=None):
         "Updates the map information from the latest frame provided by the Halite game environment."
@@ -89,6 +94,11 @@ class GameMap:
                          in enumerate(zip(grouper(owners, self.width),
                                           grouper(map(int, split_string), self.width),
                                           self.production))]
+        self.player_ids = set(square.owner for square in self if square.owner)
+        self.current_player_count = len(self.player_ids)
+        self.player_armies = [sum([1 for square in self if square.owner == player_id]) for player_id in self.player_ids]
+        self.player_productions = [sum([square.production for square in self if square.owner == player_id]) for player_id in self.player_ids]
+        self.player_interests = [self.player_productions[i] / max(1, self.player_armies[i]) for i in range(len(self.player_armies)) ]
 
     def __iter__(self):
         "Allows direct iteration over all squares in the GameMap instance."
@@ -102,12 +112,12 @@ class GameMap:
             combos = ((0, -1), (1, 0), (0, 1), (-1, 0), (0, 0))   # NORTH, EAST, SOUTH, WEST, STILL ... matches indices provided by enumerate(game_map.neighbors(square))
         else:
             combos = ((dx, dy) for dy in range(-n, n+1) for dx in range(-n, n+1) if abs(dx) + abs(dy) <= n)
-        return (self.contents[(square.y + dy) % self.height][(square.x + dx) % self.width] for dx, dy in combos if include_self or dx or dy)
+        return (self.get_square(square.x + dx, square.y + dy) for dx, dy in combos if include_self or dx or dy)
 
     def get_target(self, square, direction):
         "Returns a single, one-step neighbor in a given direction."
         dx, dy = ((0, -1), (1, 0), (0, 1), (-1, 0), (0, 0))[direction]
-        return self.contents[(square.y + dy) % self.height][(square.x + dx) % self.width]
+        return self.get_square(square.x + dx, square.y + dy)
 
     def get_distance(self, sq1, sq2):
         "Returns Manhattan distance between two squares."
@@ -148,11 +158,12 @@ class GameMap:
             logger.log("Can't find any ally square.")
             raise StopIteration
         
-        start, f_rent = s, lambda x: 1 if x < 3 else 2/3 if x < 4 else 1/2 if x < 5 else 1/3 if x < 6 else 0
+        start, f_rent = s, lambda x: 1 if x < 3 else 9/10 if x < 4 else 7/10 if x < 6 else 2/3 if x < 10 else 0
         while s:
             d = self.get_distance(start, s)
-            squares = chain(squares, [n for n in self.neighbors(s) if f_rent(self.get_distance(start, n)) * n.production >= s.production and self.get_distance(start, n) > d])
-            best = (s, s.production) if s.production > best[1] else best
+            s_rent = f_rent(d) * s.production / s.strength
+            squares = chain(squares, [n for n in self.neighbors(s) if f_rent(self.get_distance(start, n)) * n.production / n.strength >= s_rent and self.get_distance(start, n) > d])
+            best = (s, s_rent) if s_rent > best[1] else best
             s = next(squares, None)
         return best[0]
         
