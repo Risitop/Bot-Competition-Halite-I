@@ -12,10 +12,6 @@ from collections import namedtuple
 from itertools import chain, zip_longest
 from random import randint
 
-##############################################
-# Unique logger, has to be created only once #
-##############################################
-
 class Logger:
   
     def __init__(self, file_name):
@@ -38,6 +34,7 @@ class Logger:
 
 logger = Logger("Risibot")
 
+
 def grouper(iterable, n, fillvalue=None):
     "Collect data into fixed-length chunks or blocks"
     # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
@@ -54,12 +51,14 @@ NORTH, EAST, SOUTH, WEST, STILL = range(5)
 def opposite_cardinal(direction):
     "Returns the opposing cardinal direction."
     return (direction + 2) % 4 if direction != STILL else STILL
+   
+def cardinal_to_step(direction):
+    return 0 if direction == STILL else 1 if (direction - 1) % 3 == 2 else -1
 
 
 Square = namedtuple('Square', 'x y owner strength production')
 
 Move = namedtuple('Move', 'square direction')
-
 
 class GameMap:
     def __init__(self, size_string, production_string, map_string=None):
@@ -67,14 +66,9 @@ class GameMap:
         self.production = tuple(tuple(map(int, substring)) for substring in grouper(production_string.split(), self.width))
         self.contents = None
         self.get_frame(map_string)
-        self.player_ids = set(square.owner for square in self if square.owner)
-        self.starting_player_count = len(self.player_ids)
-        self.current_player_count = len(self.player_ids)
-        self.average_production = sum([square.production for square in self]) / (self.width * self.height)
-        self.player_armies = [sum([1 for square in self if square.owner == player_id]) for player_id in self.player_ids]
-        self.player_productions = [sum([square.production for square in self if square.owner == player_id]) for player_id in self.player_ids]
-        self.player_interests = [self.player_productions[i] / max(1, self.player_armies[i]) for i in range(len(self.player_armies)) ]
-
+        
+        self.starting_player_count = len(set(square.owner for square in self)) - 1
+        
     def get_frame(self, map_string=None):
         "Updates the map information from the latest frame provided by the Halite game environment."
         if map_string is None:
@@ -94,11 +88,7 @@ class GameMap:
                          in enumerate(zip(grouper(owners, self.width),
                                           grouper(map(int, split_string), self.width),
                                           self.production))]
-        self.player_ids = set(square.owner for square in self if square.owner)
-        self.current_player_count = len(self.player_ids)
-        self.player_armies = [sum([1 for square in self if square.owner == player_id]) for player_id in self.player_ids]
-        self.player_productions = [sum([square.production for square in self if square.owner == player_id]) for player_id in self.player_ids]
-        self.player_interests = [self.player_productions[i] / max(1, self.player_armies[i]) for i in range(len(self.player_armies)) ]
+            
 
     def __iter__(self):
         "Allows direct iteration over all squares in the GameMap instance."
@@ -112,12 +102,12 @@ class GameMap:
             combos = ((0, -1), (1, 0), (0, 1), (-1, 0), (0, 0))   # NORTH, EAST, SOUTH, WEST, STILL ... matches indices provided by enumerate(game_map.neighbors(square))
         else:
             combos = ((dx, dy) for dy in range(-n, n+1) for dx in range(-n, n+1) if abs(dx) + abs(dy) <= n)
-        return (self.get_square(square.x + dx, square.y + dy) for dx, dy in combos if include_self or dx or dy)
+        return (self.contents[(square.y + dy) % self.height][(square.x + dx) % self.width] for dx, dy in combos if include_self or dx or dy)
 
     def get_target(self, square, direction):
         "Returns a single, one-step neighbor in a given direction."
         dx, dy = ((0, -1), (1, 0), (0, 1), (-1, 0), (0, 0))[direction]
-        return self.get_square(square.x + dx, square.y + dy)
+        return self.contents[(square.y + dy) % self.height][(square.x + dx) % self.width]
 
     def get_distance(self, sq1, sq2):
         "Returns Manhattan distance between two squares."
@@ -125,52 +115,55 @@ class GameMap:
         dy = min(abs(sq1.y - sq2.y), sq1.y + self.height - sq2.y, sq2.y + self.height - sq1.y)
         return dx + dy
         
-    def get_direction(self, sq1, sq2):
-        "Returns the best direction to follow from sq1 to sq2"
-        dx, dy = sq1.x - sq2.x, sq1.y - sq2.y
-        dir_x, dir_y = (WEST if dx > 0 else EAST if dx < 0 else STILL), (NORTH if dy > 0 else SOUTH if dy < 0 else STILL) # Where have we to go ?
-        dir_x, dir_y = (dir_x if dx < self.width / 2 else opposite_cardinal(dir_x)), (dir_y if dy < self.height / 2 else opposite_cardinal(dir_y))
-        if dir_x == STILL:
-            return dir_y
-        if dir_y == STILL:
-            return dir_x
+    def get_directions(self, sq1, sq2):
+        "Returns viable directions to go from sq1 to sq2"
+        dx, dy = sq2.x - sq1.x, sq2.y - sq1.y
+        dir_x, dir_y = EAST if dx > 0 else STILL if dx == 0 else WEST, SOUTH if dy > 0 else STILL if dy == 0 else NORTH
+        dir_x, dir_y = opposite_cardinal(dir_x) if abs(dx) > self.width / 2 else dir_x, opposite_cardinal(dir_y) if abs(dy) > self.height / 2 else dir_y
+        return dir_x, dir_y
         
-        # We take the easiest way if we have two choices
-        t_x = self.get_target(sq1, dir_x)
-        if t_x.owner == sq1.owner:
-            return dir_x
-        t_y = self.get_target(sq1, dir_y)
-        if t_y.owner == sq1.owner:
-            return dir_y
+    def viscosity(self, square, player_id):
+        "Returns how easy crossing a square is"
+        if square.owner == player_id:
+            return 1
+        
+        return square.strength / max(1, square.production)
+        
+    def get_best_direction(self, sq1, sq2):
+        "Returns best direction to go from sq1 to sq2"
+        dx, dy = self.get_directions(sq1, sq2)
+        return dy if dx == STILL else dx if dy == STILL else min( ( (d, self.get_target(sq1, d)) for d in (dx, dy)), key=lambda t: self.viscosity(t[1], sq1.owner) )[0]
+        
+    def get_productive_squares(self):
+        "Returns a list of interesting zones"
+        max_production = int(0.85 * max( (square.production for square in self) ))
+        candidates = [square for square in self if square.production >= max_production ]
+        squares = []
+        for square in candidates:
+            if not any(self.get_distance(square, c) < 6 for c in squares):
+                squares.append(max( ((s, s.production) for s in self.neighbors(square, 4, True)), key=lambda t: t[1] )[0])
+        return squares
+        
+    def estimate_duration(self, sq1, sq2):
+        "How man turns does it take to go from sq1 to sq2"
+        t = 0
+        cursor, target = sq1, self.get_target(sq1, self.get_best_direction(sq1, sq2))
+        
+        if sq1.production == 0:
+            target = max( ((s, s.production) for s in self.neighbors(sq1) if s.strength < sq1.strength), key=lambda x: x[1] )[0]
             
-        f = lambda t: dir_x if t == t_x else dir_y
-        return f(min( (t_x, t_y), key=(lambda sq: sq.strength) ))
+        my_strength, production, remaining_strength = sq1.strength, sq1.production, int(1.2*target.strength)
         
-    def get_good_starting_zone(self, player_id):
-        "Returns an interesting zone to conquer first (labyrinthic search)"
-        squares = chain([c for c in self if c.owner == player_id])
-        best = (None, -1)
-        s, start = None, None
-        
-        try:
-            s = next(squares)
-        except StopIteration:
-            logger.log("Can't find any ally square.")
-            raise StopIteration
-        
-        start, f_rent = s, lambda x: 1 if x < 3 else 9/10 if x < 4 else 7/10 if x < 6 else 2/3 if x < 10 else 0
-        while s:
-            d = self.get_distance(start, s)
-            s_rent = f_rent(d) * s.production / s.strength
-            squares = chain(squares, [n for n in self.neighbors(s) if f_rent(self.get_distance(start, n)) * n.production / n.strength >= s_rent and self.get_distance(start, n) > d])
-            best = (s, s_rent) if s_rent > best[1] else best
-            s = next(squares, None)
-        return best[0]
-        
-    def get_square(self, x, y):
-        "Sometimes it's necessary"
-        return self.contents[y % self.height][x % self.width]
-          
+        while cursor != sq2:
+            my_strength += production
+            if remaining_strength <= my_strength:
+                my_strength -= remaining_strength
+                cursor = target
+                production += cursor.production
+                target = self.get_target(cursor, self.get_best_direction(cursor, sq2))
+                remaining_strength = int(1.2*target.strength)
+            t += 1
+        return t
 
 #####################################################################################################################
 # Functions for communicating with the Halite game environment (formerly contained in separate module networking.py #
